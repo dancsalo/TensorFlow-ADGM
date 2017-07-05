@@ -123,14 +123,13 @@ def bottleneck_trans_valid(inputs, depth, depth_bottleneck, stride, rate=1,
                                                 output)
 
 
-class Adgm:
+class Vae:
     def __init__(self):
 
         self._num_classes = cfg.NUM_CLASSES
         self._batch_size = cfg.TRAIN.BATCH_SIZE
         self._latent_size = 128
         self._hidden_size = 256
-        self._supervised_scaling_const = 0.1 * (55000 / 100)
 
         self._x_labeled = tf.placeholder(tf.float32, shape=[self._batch_size, 28, 28, 1])
         self._x_unlabeled = tf.placeholder(tf.float32, shape=[self._batch_size, 28, 28, 1])
@@ -164,17 +163,10 @@ class Adgm:
     def build_network(self):
         # Q Networks
         q_x = self.encoder(self._x)  # Out of here comes (2200, 256)
-        q_a_x = self.gaussian_stochastic(q_x, self._latent_size, 'q_a')
-        q_y_ax_input = self.linear_deterministic([(q_a_x, 'q_a_inter_1'), (q_x, 'q_x_inter_1')])
-        _ = self.multinomial_stochastic(q_y_ax_input, self._num_classes, 'q_y')
-        q_z_axy_input = self.linear_deterministic([(q_a_x, 'q_a_inter'), (q_x, 'q_x_inter'), (self._y_all, 'y_inter')])
-        q_z_axy = self.gaussian_stochastic(q_z_axy_input, self._latent_size, 'q_z')
+        q_z_x = self.gaussian_stochastic(q_x, self._latent_size, 'q_z')
 
         # P Networks
-        p_a_yz_input = self.linear_deterministic([(self._y_all, 'y_inter_2'), (q_z_axy, 'q_z_axy_inter')])
-        p_a_yz = self.gaussian_stochastic(p_a_yz_input, self._latent_size, 'p_a')
-        p_x_input = self.linear_deterministic([(p_a_yz, 'p_a_yz'), (q_z_axy, 'q_z_axy'), (self._y_all, 'q_y_ax')])
-        p_x = self.decoder(p_x_input)
+        p_x = self.decoder(q_z_x)
         x_hat = self.gaussian_stochastic(p_x, 1, 'p_x')
 
         tf.summary.image('xhat', x_hat)
@@ -205,37 +197,20 @@ class Adgm:
     def _calc_lb(self, data_type):
 
         outputs = self.outputs[data_type]
-        log_qa = self.gaussian_log_density(outputs['q_a_sample'], outputs['q_a_mu'], outputs['q_a_sigma2'])
+
         log_qz = self.gaussian_log_density(outputs['q_z_sample'], outputs['q_z_mu'], outputs['q_z_sigma2'])
         log_pz = self.standard_gaussian_log_density(outputs['q_z_sample'])
-        log_pa = self.gaussian_log_density(outputs['q_a_sample'], outputs['p_a_mu'], outputs['p_a_sigma2'])
         log_px = self.gaussian_log_density(outputs['x_in'], outputs['p_x_mu'], outputs['p_x_sigma2'])
-        log_py = self.standard_multinomial_log_density(outputs['q_y_sample'])
 
-        self._losses['{}_log_qa'.format(data_type)] = tf.reduce_mean(log_qa)
-        self._losses['{}_log_qz'.format(data_type)] = tf.reduce_mean(log_qz)
-        self._losses['{}_log_pz'.format(data_type)] = tf.reduce_mean(log_pz)
-        self._losses['{}_log_pa'.format(data_type)] = tf.reduce_mean(log_pa)
-        self._losses['{}_log_px'.format(data_type)] = tf.reduce_mean(log_px)
-        self._losses['{}_log_py'.format(data_type)] = tf.reduce_mean(log_py)
-        lb_sum = tf.squeeze(log_py) + log_pz + log_pa + log_px - log_qa - log_qz
-        if data_type == 'labeled':
-            log_qy = self.multinomial_log_density(outputs['q_y_sample'], self._y_labeled)
-            lb = lb_sum + self._supervised_scaling_const * log_qy
-            tf.summary.scalar('labeled_log_qy', tf.reduce_sum(log_qy))
-        else:  # 'unlabeled' data type
-            # TODO: Check that this works.
-            qy = tf.slice(tf.squeeze(outputs['q_y_sample']), [0, 0], [100, 10])
-            qy += 1e-8
-            qy /= tf.reduce_sum(qy)
-            lb = tf.reduce_sum(qy * (tf.reshape(lb_sum, tf.shape(qy)) - tf.log(qy)), axis=1)
+        self._losses['{}_log_qz'.format(data_type)] = log_qz
+        self._losses['{}_log_pz'.format(data_type)] = log_pz
+        self._losses['{}_log_px'.format(data_type)] = log_px
 
-        tf.summary.scalar('{}_log_qa'.format(data_type), tf.reduce_sum(log_qa))
-        tf.summary.scalar('{}_log_qz'.format(data_type), tf.reduce_sum(log_qz))
-        tf.summary.scalar('{}_log_pz'.format(data_type), tf.reduce_sum(log_pz))
-        tf.summary.scalar('{}_log_pa'.format(data_type), tf.reduce_sum(log_pa))
-        tf.summary.scalar('{}_log_py'.format(data_type), tf.reduce_sum(log_py))
-        tf.summary.scalar('{}_log_px'.format(data_type), tf.reduce_sum(log_px))
+        lb = log_pz + log_px - log_qz
+
+        tf.summary.scalar('{}_log_qz'.format(data_type), tf.reduce_mean(log_qz))
+        tf.summary.scalar('{}_log_pz'.format(data_type), tf.reduce_mean(log_pz))
+        tf.summary.scalar('{}_log_px'.format(data_type), tf.reduce_mean(log_px))
 
         return lb
 
@@ -344,28 +319,26 @@ class Adgm:
     def train_step(self, sess, x_labeled, x_unlabeled, y_labeled, train_op):
         feed_dict = {self._x_labeled: x_labeled, self._x_unlabeled: x_unlabeled, self._y_labeled: y_labeled}
         data_types = ['labeled', 'unlabeled']
-        losses = ['log_qa', 'log_qz', 'log_pa', 'log_pz', 'log_px', 'log_py']
+        losses = ['log_qz', 'log_pz', 'log_px']
         all_losses = list()
         for d in data_types:
             for l in losses:
                 all_losses.append(self._losses['{}_{}'.format(d, l)])
         all_outputs = all_losses + [self._losses['lb_u'], self._losses['lb_l'], self._losses['lb'], train_op]
-        self.l_qa, self.l_qz, self.l_pa, self.l_pz, self.l_px, self.l_py, self.u_qa, self.u_qz, self.u_pa, self.u_pz, \
-        self.u_px, self.u_py, self.lb_u, self.lb_l, self.loss, _ = \
+        self.l_qz, self.l_pz, self.l_px, self.u_qz, self.u_pz, self.u_px, self.lb_u, self.lb_l, self.loss, _ =\
             sess.run(all_outputs, feed_dict=feed_dict)
 
     def train_step_with_summary(self, sess, x_labeled, x_unlabeled, y_labeled, train_op):
         feed_dict = {self._x_labeled: x_labeled, self._x_unlabeled: x_unlabeled, self._y_labeled: y_labeled}
         data_types = ['labeled', 'unlabeled']
-        losses = ['log_qa', 'log_qz', 'log_pa', 'log_pz', 'log_px', 'log_py']
+        losses = ['log_qz', 'log_pz', 'log_px']
         all_losses = list()
         for d in data_types:
             for l in losses:
                 all_losses.append(self._losses['{}_{}'.format(d, l)])
         all_outputs = all_losses + [self._losses['lb_u'], self._losses['lb_l'], self._losses['lb'], self._summary_op,
                                     train_op]
-        self.l_qa, self.l_qz, self.l_pa, self.l_pz, self.l_px, self.l_py, self.u_qa, self.u_qz, self.u_pa, self.u_pz,\
-        self.u_px, self.u_py, self.lb_u, self.lb_l, self.loss, summary, _ =\
+        self.l_qz, self.l_pz, self.l_px, self.u_qz, self.u_pz, self.u_px, self.lb_u, self.lb_l, self.loss, summary, _ =\
             sess.run(all_outputs, feed_dict=feed_dict)
         return summary
 
@@ -376,18 +349,16 @@ class Adgm:
         return y_all, y_unlabeled_tiled
 
     def print_losses(self):
-        print('total loss: %.6f\n >>> lb_l: %.6f\n >>> lb_u: %.6f\n >>> l_qa: %.6f\n >>> l_qz: %.6f\n >>> l_pa: %.6f\n'
-              '>>> l_pz: %.6f\n >>> l_px: %.6f\n >>> l_py: %.6f\n >>> u_qa: %.6f\n >>> u_qz: %.6f\n >>> l_pa: %.6f\n >>>'
-              'u_pz: %.6f\n >>> u_px: %.6f\n >>> u_py: %.6f' % (self.loss, self.lb_l, self.lb_u, self.l_qa,
-                                                                self.l_qz, self.l_pa, self.l_pz, self.l_px,
-                                                                self.l_py, self.u_qa, self.u_qz, self.u_pa,
-                                                                self.u_pz, self.u_px, self.u_py))
+        print('total loss: %.6f\n >>> lb_l: %.6f\n >>> lb_u: %.6f\n >>> l_qz: %.6f\n'
+              '>>> l_pz: %.6f\n >>> l_px: %.6f\n >>> u_qz: %.6f\n >>> u_pz: %.6f\n >>> u_px: %.6f'
+              % (self.loss, self.lb_l, self.lb_u, self.l_qz, self.l_pz, self.l_px, self.u_qz, self.u_pz, self.u_px))
 
     @staticmethod
     def standard_gaussian_log_density(x):
         c = - 0.5 * math.log(2 * math.pi)
         density = c - tf.square(x) / 2
-        return -tf.reduce_mean(tf.reduce_sum(density, axis=-1), axis=[1, 2])
+        #return -tf.reduce_mean(tf.reduce_sum(density, axis=-1), axis=[1, 2])
+        return density
 
     def standard_multinomial_log_density(self, x):
         total = tf.stack([tf.shape(x)[0] * tf.shape(x)[3]])
@@ -400,7 +371,9 @@ class Adgm:
     def gaussian_log_density(x, mu, sigma2):
         c = - 0.5 * math.log(2 * math.pi)
         density = c - tf.log(sigma2) / 2 - tf.squared_difference(x, mu) / (2 * sigma2)
-        return -tf.reduce_mean(tf.reduce_sum(density, axis=-1), axis=(1, 2))
+        # return -tf.reduce_mean(tf.reduce_sum(density, axis=-1), axis=(1, 2))
+        return density
+
 
     @staticmethod
     def multinomial_log_density(x, mu):

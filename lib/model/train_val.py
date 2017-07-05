@@ -173,21 +173,18 @@ class SolverWrapper(object):
             now = time.time()
             if now - last_summary_time > cfg.TRAIN.SUMMARY_INTERVAL:
                 # Compute the graph with summary
-                l_qa, l_qz, l_pa, l_pz, l_px, l_py, u_qa, u_qz, u_pa, u_pz, u_px, u_py, lb_u, lb_l, loss, lb_l, lb_u,\
                 summary = self.net.train_step_with_summary(sess, x_labeled, x_unlabeled, y_labeled, train_op)
                 self.writer.add_summary(summary, float(iters))
                 last_summary_time = now
             else:
                 # Compute the graph without summary
-                l_qa, l_qz, l_pa, l_pz, l_px, l_py, u_qa, u_qz, u_pa, u_pz, u_px, u_py, lb_u, lb_l, loss, lb_l, lb_u =\
-                    self.net.train_step(sess, x_labeled, x_unlabeled, y_labeled, train_op)
+                self.net.train_step(sess, x_labeled, x_unlabeled, y_labeled, train_op)
             timer.toc()
 
             # Display training information
             if iters % (cfg.TRAIN.DISPLAY) == 0:
-                print('iter: %d / %d, total loss: %.6f\n >>> lb_l: %.6f\n >>> lb_u: %.6f\n >>> l_qa: %.6f\n >>> l_qz: %.6f\n >>> l_pa: %.6f\n >>> l_pz: %.6f\n >>> l_px: %.6f\n >>> l_py: %.6f\n >>> u_qa: %.6f\n >>> u_qz: %.6f\n >>> l_pa: %.6f\n >>> u_pz: %.6f\n >>> u_px: %.6f\n >>> u_py: %.6f\n >>> lr: %f' %
-                      (iters, int(max_iters),  loss, lb_l, lb_u, l_qa, l_qz, l_pa, l_pz, l_px, l_py, u_qa, u_qz,
-                       u_pa, u_pz, u_px, u_py, lr.eval()))
+                print('iter: %d / %d, lr: %f' % (iters, int(max_iters), lr.eval()))
+                self.net.print_losses()
                 print('speed: {:.3f}s / iter'.format(timer.average_time))
             if iters % cfg.TRAIN.SNAPSHOT_ITERS == 0:
                 last_snapshot_iter = iters

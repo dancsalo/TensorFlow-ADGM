@@ -16,6 +16,7 @@ import numpy as np
 import sys
 
 from nets.adgm import Adgm
+from nets.vae import Vae
 from datasets.mnist import Mnist
 
 def parse_args():
@@ -65,6 +66,12 @@ if __name__ == '__main__':
 
     np.random.seed(cfg.RNG_SEED)
 
+    # Choose net
+    if args.net == 'adgm':
+        net = Adgm
+    if args.net == 'vae':
+        net = Vae
+
     # output directory where the models are saved
     output_dir = get_output_dir(args.dataset, args.tag)
     print('Output will be saved to `{:s}`'.format(output_dir))
@@ -73,5 +80,5 @@ if __name__ == '__main__':
     tb_dir = get_output_tb_dir(args.dataset, args.tag)
     print('TensorFlow summaries will be saved to `{:s}`'.format(tb_dir))
 
-    train_net(Adgm, Mnist, output_dir, tb_dir, max_iters=args.max_iters)
+    train_net(net, Mnist, output_dir, tb_dir, max_iters=args.max_iters)
 
