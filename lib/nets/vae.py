@@ -135,7 +135,6 @@ class Vae:
         self._x_unlabeled = tf.placeholder(tf.float32, shape=[self._batch_size, 28, 28, 1])
         self._x = tf.concat([self._x_labeled, self._x_unlabeled], 0)
         self._y_labeled = tf.placeholder(tf.float32, shape=[self._batch_size, self._num_classes])
-        self._y_all, self.y_unlabeled = self.generate_y(self._y_labeled)
 
         self._losses = {}
 
@@ -155,8 +154,8 @@ class Vae:
         lb_l = self._calc_lb('labeled')
         self._losses['lb_l'] = tf.reduce_mean(lb_l)
         lb_u = self._calc_lb('unlabeled')
-        self._losses['lb_u'] = tf.reduce_mean(lb_l)
-        elbo = tf.reduce_mean(lb_l) + tf.reduce_mean(lb_u)
+        self._losses['lb_u'] = tf.reduce_mean(lb_u)
+        elbo = tf.reduce_mean(tf.concat([lb_l, lb_u], 0))
         self._losses['lb'] = elbo
         return elbo
 
@@ -168,7 +167,9 @@ class Vae:
         # P Networks
         p_x = self.decoder(q_z_x)
         x_hat = self.gaussian_stochastic(p_x, 1, 'p_x')
-
+        tf.summary.image('x_in_label', self._x_labeled)
+        tf.summary.image('x_in_unlabeled', self._x_unlabeled)
+        tf.summary.image('x_in_unlabeled_tiled', self.outputs['unlabeled']['x_in'])
         tf.summary.image('xhat', x_hat)
 
     def create_architecture(self, mode, tag=None):
@@ -202,9 +203,9 @@ class Vae:
         log_pz = self.standard_gaussian_log_density(outputs['q_z_sample'])
         log_px = self.gaussian_log_density(outputs['x_in'], outputs['p_x_mu'], outputs['p_x_sigma2'])
 
-        self._losses['{}_log_qz'.format(data_type)] = log_qz
-        self._losses['{}_log_pz'.format(data_type)] = log_pz
-        self._losses['{}_log_px'.format(data_type)] = log_px
+        self._losses['{}_log_qz'.format(data_type)] = tf.reduce_mean(log_qz)
+        self._losses['{}_log_pz'.format(data_type)] = tf.reduce_mean(log_pz)
+        self._losses['{}_log_px'.format(data_type)] = tf.reduce_mean(log_px)
 
         lb = log_pz + log_px - log_qz
 
@@ -280,37 +281,6 @@ class Vae:
         self.split_labeled_unlabeled(rv_single_draw, '{}_sample'.format(scope))
         return rv_single_draw
 
-    def multinomial_stochastic(self, input_tensor, num_maps, scope):
-        """
-        :param inputs_list: list of Tensors to be added and input into the block
-        :return: random variable single draw, mean, and intermediate representation
-        """
-        with tf.variable_scope(scope):
-            input_tensor = tf.expand_dims(tf.expand_dims(input_tensor, 1), 1) if len(input_tensor.get_shape()) != 4 \
-                else input_tensor
-            intermediate = slim.conv2d(input_tensor, self._hidden_size, [1, 1], weights_initializer=self._initializer,
-                                  scope='conv1')
-            pi = slim.conv2d(intermediate, num_maps, [1, 1], weights_initializer=self._initializer,
-                                 activation_fn=None, scope='mean')
-            rv_single_draw = tf.nn.softmax(pi)
-        self.split_labeled_unlabeled(pi, '{}_pi'.format(scope))
-        self.split_labeled_unlabeled(rv_single_draw, '{}_sample'.format(scope))
-        return rv_single_draw
-
-    def linear_deterministic(self, inputs_list_with_scopes):
-        """
-        :param inputs_list_with_scopes: array of 2-tuples (tensor, 'scope')
-        :return: list of tensors in input order
-        """
-        with tf.variable_scope('linear'):
-            outputs_list = list()
-            for tensor, scope in inputs_list_with_scopes:
-                tensor = tf.expand_dims(tf.expand_dims(tensor, 1), 1) if len(tensor.get_shape()) != 4 else tensor
-                linear_layer = slim.conv2d(tensor, self._latent_size, [1, 1], weights_initializer=self._initializer,
-                                           scope=scope)
-                outputs_list.append(linear_layer)
-            return sum(outputs_list)
-
     def get_summary(self, sess, x_labeled, x_unlabeled, y_labeled):
         feed_dict = {self._x_labeled: x_labeled, self._x_unlabeled: x_unlabeled, self._y_labeled: y_labeled}
         summary = sess.run(self._summary_op, feed_dict=feed_dict)
@@ -342,12 +312,6 @@ class Vae:
             sess.run(all_outputs, feed_dict=feed_dict)
         return summary
 
-    def generate_y(self, y_labeled):
-        y_unlabeled_tiled = tf.reshape(tf.tile(tf.eye(self._num_classes), [1, self._batch_size]),
-                                       [self._num_classes * self._batch_size, self._num_classes])
-        y_all = tf.concat([y_labeled, y_unlabeled_tiled], 0)
-        return y_all, y_unlabeled_tiled
-
     def print_losses(self):
         print('total loss: %.6f\n >>> lb_l: %.6f\n >>> lb_u: %.6f\n >>> l_qz: %.6f\n'
               '>>> l_pz: %.6f\n >>> l_px: %.6f\n >>> u_qz: %.6f\n >>> u_pz: %.6f\n >>> u_px: %.6f'
@@ -357,22 +321,13 @@ class Vae:
     def standard_gaussian_log_density(x):
         c = - 0.5 * math.log(2 * math.pi)
         density = c - tf.square(x) / 2
-        #return -tf.reduce_mean(tf.reduce_sum(density, axis=-1), axis=[1, 2])
-        return density
-
-    def standard_multinomial_log_density(self, x):
-        total = tf.stack([tf.shape(x)[0] * tf.shape(x)[3]])
-        labels = tf.reshape(tf.tile(tf.constant([1 / self._num_classes]), total), tf.shape(x))
-        density = tf.nn.softmax_cross_entropy_with_logits(labels=labels,
-                                                          logits=x)
-        return tf.reduce_sum(density, axis=-1)
+        return -density
 
     @staticmethod
     def gaussian_log_density(x, mu, sigma2):
         c = - 0.5 * math.log(2 * math.pi)
         density = c - tf.log(sigma2) / 2 - tf.squared_difference(x, mu) / (2 * sigma2)
-        # return -tf.reduce_mean(tf.reduce_sum(density, axis=-1), axis=(1, 2))
-        return density
+        return -density
 
 
     @staticmethod

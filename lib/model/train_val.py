@@ -18,6 +18,7 @@ from model.config import cfg
 import tensorflow as tf
 from tensorflow.python import pywrap_tensorflow
 
+import matplotlib.pyplot as plt
 
 class SolverWrapper(object):
     """
