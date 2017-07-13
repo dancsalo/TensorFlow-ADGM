@@ -19,15 +19,14 @@ from model.config import cfg
 import numpy as np
 import time
 
-import matplotlib.pyplot as plt
-
 
 class Mnist(object):
     """Fast R-CNN data layer used for training."""
 
     def __init__(self, random=False):
         """Set the roidb to be used by this layer during training."""
-        self._images = np.expand_dims(np.array([i.reshape(28, 28) for i in mnist.train.images]), 3)
+        means = np.expand_dims(np.array([i.reshape(28, 28) for i in mnist.train.images]), 3)
+        self._images = self._static_binarize(means)
         self._labels = mnist.train.labels.astype(np.int32)
 
         self._num_train_images = 55000
@@ -38,6 +37,10 @@ class Mnist(object):
         # Also set a random flag
         self._random = random
         self._shuffle_inds()
+
+    @staticmethod
+    def _static_binarize(means):
+        return np.random.binomial(1, means)
 
     def _split_data(self):
         counts = np.zeros(self._num_classes)
