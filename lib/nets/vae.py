@@ -141,9 +141,9 @@ class Vae:
         self._initializer = self.define_initializer()
         self._blocks_encoder = [resnet_utils.Block('block4', bottleneck, [(256, 128, 1)] * 3)]
         self._blocks_decoder_valid = [resnet_utils.Block('block5', bottleneck_trans_valid,
-                                                         [(256, 128, 1), (256, 128, 2)])]
+                                                         [(128, 128, 1), (256, 128, 2)])]
         self._blocks_decoder_same = [resnet_utils.Block('block5', bottleneck_trans_same,
-                                                        [(256, 128, 2), (256, 128, 2)])]
+                                                        [(128, 64, 2), (128, 64, 2)])]
         self._resnet_scope = 'resnet_v1_%d' % 101
 
         x_unlabeled_tiled = tf.tile(self._x_unlabeled, [self._num_classes, 1, 1, 1])  # (100, 256) --> (2100, 256)
@@ -166,10 +166,10 @@ class Vae:
 
         # P Networks
         p_x = self.decoder(q_z_x)
-        x_hat = self.gaussian_stochastic(p_x, 1, 'p_x')
+        x_hat = self.bernoulli_stochastic(p_x, 1, 'p_x')
+
+        # Image summaries
         tf.summary.image('x_in_label', self._x_labeled)
-        tf.summary.image('x_in_unlabeled', self._x_unlabeled)
-        tf.summary.image('x_in_unlabeled_tiled', self.outputs['unlabeled']['x_in'])
         tf.summary.image('xhat', x_hat)
 
     def create_architecture(self, mode, tag=None):
@@ -201,13 +201,15 @@ class Vae:
 
         log_qz = self.gaussian_log_density(outputs['q_z_sample'], outputs['q_z_mu'], outputs['q_z_sigma2'])
         log_pz = self.standard_gaussian_log_density(outputs['q_z_sample'])
-        log_px = self.gaussian_log_density(outputs['x_in'], outputs['p_x_mu'], outputs['p_x_sigma2'])
+        log_px = self.bernoulli_log_density(outputs['x_in'], outputs['p_x_mu'])
 
         self._losses['{}_log_qz'.format(data_type)] = tf.reduce_mean(log_qz)
         self._losses['{}_log_pz'.format(data_type)] = tf.reduce_mean(log_pz)
         self._losses['{}_log_px'.format(data_type)] = tf.reduce_mean(log_px)
 
-        lb = log_pz + log_px - log_qz
+        lb = tf.reduce_sum(tf.squared_difference(outputs['x_in'], outputs['p_x_mu']), axis=[1,2,3])
+        lb -= 0.5 * tf.reduce_sum(1.0 - tf.square(outputs['q_z_mu']) - 0.5 * tf.square(outputs['q_z_sigma2']) +
+            tf.log(outputs['q_z_sigma2'] + 1e-12), axis=[1,2,3])
 
         tf.summary.scalar('{}_log_qz'.format(data_type), tf.reduce_mean(log_qz))
         tf.summary.scalar('{}_log_pz'.format(data_type), tf.reduce_mean(log_pz))
@@ -232,13 +234,13 @@ class Vae:
             net = resnet_utils.conv2d_same(x, 64, 7, stride=2, scope='conv1')
             net = tf.pad(net, [[0, 0], [1, 1], [1, 1], [0, 0]])
             x = slim.max_pool2d(net, [3, 3], stride=2, padding='VALID', scope='pool1')
-            x_features_all, _ = resnet_v1.resnet_v1(x,
-                                                self._blocks_encoder,
-                                                global_pool=False,
-                                                include_root_block=False,
-                                                scope=self._resnet_scope)
-            x_features_all = tf.reduce_mean(x_features_all, axis=[1, 2])
-            x_features_labeled, x_features_unlabeled = tf.split(x_features_all, 2)
+            x, _ = resnet_v1.resnet_v1(x,
+                                        self._blocks_encoder,
+                                        global_pool=False,
+                                        include_root_block=False,
+                                        scope=self._resnet_scope)
+            x = tf.reduce_mean(x, axis=[1, 2])
+            x_features_labeled, x_features_unlabeled = tf.split(x, 2)
 
         x_features_tiled = tf.tile(x_features_unlabeled, [self._num_classes, 1])  # (100, 256) --> (2100, 256)
         x_features = tf.concat([x_features_labeled, x_features_tiled], 0) # (2100, 256) --> (2200, 256)
@@ -259,6 +261,26 @@ class Vae:
                                           scope=self._resnet_scope)
         return p_x
 
+    def bernoulli_stochastic(self, input_tensor, num_maps, scope):
+        """
+        :param inputs_list: list of Tensors to be added and input into the block
+        :return: random variable single draw, mean, standard deviation, and intermediate representation
+        """
+        with tf.variable_scope(scope):
+            input_tensor = tf.expand_dims(tf.expand_dims(input_tensor, 1), 1) if len(input_tensor.get_shape()) != 4 \
+                else input_tensor
+            intermediate = slim.conv2d(input_tensor, self._hidden_size, [1, 1], weights_initializer=self._initializer,
+                                       scope='conv1')
+            mean = slim.conv2d(intermediate, num_maps, [1, 1], weights_initializer=self._initializer,
+                               activation_fn=tf.sigmoid, scope='mean')
+            tf.summary.histogram(scope + '_mu', mean)
+            rv_single_draw = tf.where(tf.random_uniform(tf.shape(mean)) - mean < 0, tf.ones(tf.shape(mean)),
+                                      tf.zeros(tf.shape(mean)))
+
+        self.split_labeled_unlabeled(mean, '{}_mu'.format(scope))
+        self.split_labeled_unlabeled(rv_single_draw, '{}_sample'.format(scope))
+        return rv_single_draw
+
     def gaussian_stochastic(self, input_tensor, num_maps, scope):
         """
         :param inputs_list: list of Tensors to be added and input into the block
@@ -274,6 +296,8 @@ class Vae:
             sigma2 = tf.nn.softplus(
                 slim.conv2d(intermediate, num_maps, [1, 1], weights_initializer=self._initializer,
                             activation_fn=None, scope='sigma2'))
+            tf.summary.histogram(scope + '_mean', mean)
+            tf.summary.histogram(scope + '_sigma2', sigma2)
             rv_single_draw = mean + tf.sqrt(sigma2) * tf.random_normal(tf.shape(mean))
 
         self.split_labeled_unlabeled(mean, '{}_mu'.format(scope))
@@ -331,9 +355,9 @@ class Vae:
 
 
     @staticmethod
-    def multinomial_log_density(x, mu):
-        density = tf.nn.softmax_cross_entropy_with_logits(labels=mu, logits=x)
-        return tf.reduce_sum(density, axis=-1)
+    def bernoulli_log_density(x, mu):
+        density = x * tf.log(mu + 1e-12) + (1 - x) * tf.log(1 - mu + 1e-12)
+        return -density
 
     @staticmethod
     def define_initializer():
